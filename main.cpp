@@ -3,6 +3,7 @@
 #include <fstream>
 #include "md5.h"
 #include <iomanip>
+#include <array>
 using namespace std;
 using namespace chrono;
 
@@ -58,19 +59,17 @@ int main()
         if (curr_num > 1000000)
         {
             auto start_hash = system_clock::now();
-            bit32 state[4];
-            for (string pw : q.guesses)
+            bit32 state[8][4];
+            //SIMD这部分也要改
+            int count = q.guesses.size();
+            for(int i=0;i<count;i+=8)
             {
-                // TODO：对于SIMD实验，将这里替换成你的SIMD MD5函数
-                MD5Hash(pw, state);
-
-                // 以下注释部分用于输出猜测和哈希，但是由于自动测试系统不太能写文件，所以这里你可以改成cout
-                // a<<pw<<"\t";
-                // for (int i1 = 0; i1 < 4; i1 += 1)
-                // {
-                //     a << std::setw(8) << std::setfill('0') << hex << state[i1];
-                // }
-                // a << endl;
+                array<std::string,8> input = {"","","",""};
+                for(int j=0;j<8&&i+j<count;j++)
+                {
+                    input[j]=q.guesses[i+j];
+                }
+                MD5Hash_SIMD(input,state);
             }
 
             // 在这里对哈希所需的总时长进行计算
