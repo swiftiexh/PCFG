@@ -16,7 +16,7 @@ void PriorityQueue::CalProb(PT &pt)
     int index = 0;
 
 
-    for (int idx : pt.curr_indices)
+    for (int idx : pt.curr_indices) //pt.curr_indices记录了已经实例化的下标
     {
         // pt.content[index].PrintSeg();
         if (pt.content[index].type == 1)
@@ -207,6 +207,7 @@ void PriorityQueue::Generate(PT pt)
         // 这个for循环就是你需要进行并行化的主要部分了，特别是在多线程&GPU编程任务中
         // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
         // 这个过程是可以高度并行化的
+        //一次生成多个guess   a->ordered_values[i:i+4]
         for (int i = 0; i < pt.max_indices[0]; i += 1)
         {
             string guess = a->ordered_values[i];

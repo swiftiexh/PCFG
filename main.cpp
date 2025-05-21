@@ -34,8 +34,9 @@ int main()
     // std::ofstream a("./files/results.txt");
     while (!q.priority.empty())
     {
+        //history:记录口令总数 q.total_guesses:待哈希的口令数 curr_num:用于判定是否输出 "Guesses generated: " 以及进行哈希
         q.PopNext();
-        q.total_guesses = q.guesses.size();
+        q.total_guesses = q.guesses.size(); //这里guesses相关要改，多线程储存会改变
         if (q.total_guesses - curr_num >= 100000)
         {
             cout << "Guesses generated: " <<history + q.total_guesses << endl;

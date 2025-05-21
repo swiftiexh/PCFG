@@ -1,126 +1,162 @@
-#include <iostream>
 #include <string>
-#include <cstring>
-//用NEON实现SIMD并行化
-#include <arm_neon.h>
-#include <array>
-
-
+#include <iostream>
+#include <unordered_map>
+#include <queue>
+#include <omp.h>
+// #include <chrono>   
+// using namespace chrono;
 using namespace std;
 
-// 定义了Byte，便于使用
-typedef unsigned char Byte;
-// 定义了32比特
-typedef unsigned int bit32;
-//要实现8个32位并行，但NEON寄存器只有128位，所以需要两个拼起来
-typedef struct {
-    uint32x4_t val[2];  // 两个4x32bit，合起来8x32bit
-} uint32x8_t;
+class segment
+{
+public:
+    int type; // 0: 未设置, 1: 字母, 2: 数字, 3: 特殊字符
+    int length; // 长度，例如S6的长度就是6
+    segment(int type, int length)
+    {
+        this->type = type;
+        this->length = length;
+    };
+
+    // 打印相关信息
+    void PrintSeg();
+
+    // 按照概率降序排列的value。例如，123是D3的一个具体value，其概率在D3的所有value中排名第三，那么其位置就是ordered_values[2]
+    vector<string> ordered_values;
+
+    // 按照概率降序排列的频数（概率）
+    vector<int> ordered_freqs;
+
+    // total_freq作为分母，用于计算每个value的概率
+    int total_freq = 0;
+
+    // 未排序的value，其中int就是对应的id
+    unordered_map<string, int> values;
+
+    // 根据id，在freqs中查找/修改一个value的频数
+    unordered_map<int, int> freqs;
 
 
-// MD5的一系列参数。参数是固定的，其实你不需要看懂这些
-#define s11 7
-#define s12 12
-#define s13 17
-#define s14 22
-#define s21 5
-#define s22 9
-#define s23 14
-#define s24 20
-#define s31 4
-#define s32 11
-#define s33 16
-#define s34 23
-#define s41 6
-#define s42 10
-#define s43 15
-#define s44 21
+    void insert(string value);
+    void order();
+    void PrintValues();
+};
 
-/**
- * @Basic MD5 functions.
- *
- * @param there bit32.
- *
- * @return one bit32.
- */
-// 定义了一系列MD5中的具体函数
-// 这四个计算函数是需要你进行SIMD并行化的
-// 可以看到，FGHI四个函数都涉及一系列位运算，在数据上是对齐的，非常容易实现SIMD的并行化
+class PT
+{
+public:
+    // 例如，L6D1的content大小为2，content[0]为L6，content[1]为D1
+    vector<segment> content;
 
-//修改：SIMD一次处理8个32位整数
-#define F_NEON(x, y, z) ( (uint32x8_t){ \
-    vorrq_u32(vandq_u32((x).val[0], (y).val[0]), vandq_u32(vmvnq_u32((x).val[0]), (z).val[0])), \
-    vorrq_u32(vandq_u32((x).val[1], (y).val[1]), vandq_u32(vmvnq_u32((x).val[1]), (z).val[1])) \
-} )
+    // pivot值，参见PCFG的原理
+    int pivot = 0;
+    void insert(segment seg);
+    void PrintPT();
 
-#define G_NEON(x, y, z) ( (uint32x8_t){ \
-    vorrq_u32(vandq_u32((x).val[0], (z).val[0]), vandq_u32((y).val[0], vmvnq_u32((z).val[0]))), \
-    vorrq_u32(vandq_u32((x).val[1], (z).val[1]), vandq_u32((y).val[1], vmvnq_u32((z).val[1]))) \
-} )
+    // 导出新的PT
+    vector<PT> NewPTs();
 
-#define H_NEON(x, y, z) ( (uint32x8_t){ \
-    veorq_u32(veorq_u32((x).val[0], (y).val[0]), (z).val[0]), \
-    veorq_u32(veorq_u32((x).val[1], (y).val[1]), (z).val[1]) \
-} )
+    // 记录当前每个segment（除了最后一个）对应的value，在模型中的下标
+    vector<int> curr_indices;
 
-#define I_NEON(x, y, z) ( (uint32x8_t){ \
-    veorq_u32((y).val[0], vorrq_u32((x).val[0], vmvnq_u32((z).val[0]))), \
-    veorq_u32((y).val[1], vorrq_u32((x).val[1], vmvnq_u32((z).val[1]))) \
-} )
+    // 记录当前每个segment（除了最后一个）对应的value，在模型中的最大下标（即最大可以是max_indices[x]-1）
+    vector<int> max_indices;
+    // void init();
+    float preterm_prob;
+    float prob;
+};
 
-/**
- * @Rotate Left.
- *
- * @param {num} the raw number.
- *
- * @param {n} rotate left n.
- *
- * @return the number after rotated left.
- */
-// 定义了一系列MD5中的具体函数
-// 这五个计算函数（ROTATELEFT/FF/GG/HH/II）和之前的FGHI一样，都是需要你进行SIMD并行化的
-// 但是你需要注意的是#define的功能及其效果，可以发现这里的FGHI是没有返回值的，为什么呢？你可以查询#define的含义和用法
-#define ROTATELEFT_NEON(x, n) ( (uint32x8_t){ \
-    vsliq_n_u32(vshrq_n_u32((x).val[0], 32 - (n)), (x).val[0], (n)), \
-    vsliq_n_u32(vshrq_n_u32((x).val[1], 32 - (n)), (x).val[1], (n)) \
-} )
+class model
+{
+public:
+    // 对于PT/LDS而言，序号是递增的
+    // 训练时每遇到一个新的PT/LDS，就获取一个新的序号，并且当前序号递增1
+    int preterm_id = -1;
+    int letters_id = -1;
+    int digits_id = -1;
+    int symbols_id = -1;
+    int GetNextPretermID()
+    {
+        preterm_id++;
+        return preterm_id;
+    };
+    int GetNextLettersID()
+    {
+        letters_id++;
+        return letters_id;
+    };
+    int GetNextDigitsID()
+    {
+        digits_id++;
+        return digits_id;
+    };
+    int GetNextSymbolsID()
+    {
+        symbols_id++;
+        return symbols_id;
+    };
 
+    // C++上机和数据结构实验中，一般不允许使用stl
+    // 这就导致大家对stl不甚熟悉。现在是时候体会stl的便捷之处了
+    // unordered_map: 无序映射
+    int total_preterm = 0;
+    vector<PT> preterminals;
+    int FindPT(PT pt);
 
-#define FF_NEON(a, b, c, d, x, s, ac) { \
-    a.val[0] = vaddq_u32(a.val[0], vaddq_u32(F_NEON(b, c, d).val[0], vaddq_u32((x).val[0], vdupq_n_u32(ac)))); \
-    a.val[0] = ROTATELEFT_NEON(a, s).val[0]; \
-    a.val[0] = vaddq_u32(a.val[0], b.val[0]); \
-    a.val[1] = vaddq_u32(a.val[1], vaddq_u32(F_NEON(b, c, d).val[1], vaddq_u32((x).val[1], vdupq_n_u32(ac)))); \
-    a.val[1] = ROTATELEFT_NEON(a, s).val[1]; \
-    a.val[1] = vaddq_u32(a.val[1], b.val[1]); \
-}
+    vector<segment> letters;
+    vector<segment> digits;
+    vector<segment> symbols;
+    int FindLetter(segment seg);
+    int FindDigit(segment seg);
+    int FindSymbol(segment seg);
 
-#define GG_NEON(a, b, c, d, x, s, ac) { \
-    a.val[0] = vaddq_u32(a.val[0], vaddq_u32(G_NEON(b, c, d).val[0], vaddq_u32((x).val[0], vdupq_n_u32(ac)))); \
-    a.val[0] = ROTATELEFT_NEON(a, s).val[0]; \
-    a.val[0] = vaddq_u32(a.val[0], b.val[0]); \
-    a.val[1] = vaddq_u32(a.val[1], vaddq_u32(G_NEON(b, c, d).val[1], vaddq_u32((x).val[1], vdupq_n_u32(ac)))); \
-    a.val[1] = ROTATELEFT_NEON(a, s).val[1]; \
-    a.val[1] = vaddq_u32(a.val[1], b.val[1]); \
-}
+    unordered_map<int, int> preterm_freq;
+    unordered_map<int, int> letters_freq;
+    unordered_map<int, int> digits_freq;
+    unordered_map<int, int> symbols_freq;
 
-#define HH_NEON(a, b, c, d, x, s, ac) { \
-    a.val[0] = vaddq_u32(a.val[0], vaddq_u32(H_NEON(b, c, d).val[0], vaddq_u32((x).val[0], vdupq_n_u32(ac)))); \
-    a.val[0] = ROTATELEFT_NEON(a, s).val[0]; \
-    a.val[0] = vaddq_u32(a.val[0], b.val[0]); \
-    a.val[1] = vaddq_u32(a.val[1], vaddq_u32(H_NEON(b, c, d).val[1], vaddq_u32((x).val[1], vdupq_n_u32(ac)))); \
-    a.val[1] = ROTATELEFT_NEON(a, s).val[1]; \
-    a.val[1] = vaddq_u32(a.val[1], b.val[1]); \
-}
+    vector<PT> ordered_pts;
 
-#define II_NEON(a, b, c, d, x, s, ac) { \
-    a.val[0] = vaddq_u32(a.val[0], vaddq_u32(I_NEON(b, c, d).val[0], vaddq_u32((x).val[0], vdupq_n_u32(ac)))); \
-    a.val[0] = ROTATELEFT_NEON(a, s).val[0]; \
-    a.val[0] = vaddq_u32(a.val[0], b.val[0]); \
-    a.val[1] = vaddq_u32(a.val[1], vaddq_u32(I_NEON(b, c, d).val[1], vaddq_u32((x).val[1], vdupq_n_u32(ac)))); \
-    a.val[1] = ROTATELEFT_NEON(a, s).val[1]; \
-    a.val[1] = vaddq_u32(a.val[1], b.val[1]); \
-}
+    // 给定一个训练集，对模型进行训练
+    void train(string train_path);
 
+    // 对已经训练的模型进行保存
+    void store(string store_path);
 
-void MD5Hash_SIMD(array<std::string,8> input, bit32 state[8][4]);
+    // 从现有的模型文件中加载模型
+    void load(string load_path);
+
+    // 对一个给定的口令进行切分
+    void parse(string pw);
+
+    void order();
+
+    // 打印模型
+    void print();
+};
+
+// 优先队列，用于按照概率降序生成口令猜测
+// 实际上，这个class负责队列维护、口令生成、结果存储的全部过程
+class PriorityQueue
+{
+public:
+    // 用vector实现的priority queue
+    vector<PT> priority;
+
+    // 模型作为成员，辅助猜测生成
+    model m;
+
+    // 计算一个pt的概率
+    void CalProb(PT &pt);
+
+    // 优先队列的初始化
+    void init();
+
+    // 对优先队列的一个PT，生成所有guesses
+    void Generate(PT pt);
+
+    // 将优先队列最前面的一个PT
+    void PopNext();
+    int total_guesses = 0;
+    vector<string> guesses;
+};
