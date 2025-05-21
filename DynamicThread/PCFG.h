@@ -5,6 +5,11 @@
 #include <omp.h>
 // #include <chrono>   
 // using namespace chrono;
+
+//pthread多线程需要导入的库
+#include <pthread.h>
+#include <vector>
+
 using namespace std;
 
 class segment
@@ -158,5 +163,13 @@ public:
     // 将优先队列最前面的一个PT
     void PopNext();
     int total_guesses = 0;
+
+    // 多线程下，每个线程有自己的guess缓冲区
+    std::vector<std::vector<std::string>> thread_guesses;
+    int thread_num = 4; // 线程数，可根据实际调整
+
+    // 合并所有线程的guess到主guesses
+    void MergeGuesses();
+
     vector<string> guesses;
 };

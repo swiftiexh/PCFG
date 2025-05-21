@@ -179,10 +179,75 @@ vector<PT> PT::NewPTs()
 
 // 这个函数是PCFG并行化算法的主要载体
 // 尽量看懂，然后进行并行实现
+
+// 线程池工作线程函数
+void* WorkerThread(void* pool_ptr) {
+    PriorityQueue* pool = (PriorityQueue*)pool_ptr;
+    while (true) {
+        PriorityQueue::ThreadArgs task;
+        {
+            std::unique_lock<std::mutex> lock(pool->queue_mutex);
+            pool->queue_cv.wait(lock, [&]{ return !pool->task_queue.empty() || pool->stop; });
+            if (pool->stop && pool->task_queue.empty()) break;
+            task = pool->task_queue.front();
+            pool->task_queue.pop();
+        }
+        // 执行任务
+        if (task.prefix.empty()) {
+            // 单segment
+            for (int i = task.start; i < task.end; ++i) {
+                std::string guess = task.a->ordered_values[i];
+                pool->thread_guesses[task.thread_id].emplace_back(guess);
+            }
+        } else {
+            // 多segment
+            for (int i = task.start; i < task.end; ++i) {
+                std::string temp = task.prefix + task.a->ordered_values[i];
+                pool->thread_guesses[task.thread_id].emplace_back(temp);
+            }
+        }
+        {
+            std::unique_lock<std::mutex> lock(pool->running_mutex);
+            pool->running_tasks--;
+            if (pool->running_tasks == 0)
+                pool->running_cv.notify_one();
+        }
+    }
+    return nullptr;
+}
+
+void PriorityQueue::InitThreadPool() {
+    stop = false;
+    pool_threads.resize(thread_num);
+    for (int i = 0; i < thread_num; ++i) {
+        pthread_create(&pool_threads[i], nullptr, WorkerThread, this);
+    }
+}
+
+void PriorityQueue::DestroyThreadPool() {
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        stop = true;
+    }
+    queue_cv.notify_all();
+    for (auto& t : pool_threads) {
+        pthread_join(t, nullptr);
+    }
+}
+
+void PriorityQueue::WaitAllTasks() {
+    std::unique_lock<std::mutex> lock(running_mutex);
+    running_cv.wait(lock, [&]{ return running_tasks == 0; });
+}
+
 void PriorityQueue::Generate(PT pt)
 {
     // 计算PT的概率，这里主要是给PT的概率进行初始化
     CalProb(pt);
+
+    // 多线程准备
+    thread_guesses.clear();
+    thread_guesses.resize(thread_num);
 
     // 对于只有一个segment的PT，直接遍历生成其中的所有value即可
     if (pt.content.size() == 1)
@@ -208,13 +273,23 @@ void PriorityQueue::Generate(PT pt)
         // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
         // 这个过程是可以高度并行化的
         //一次生成多个guess   a->ordered_values[i:i+4]
-        for (int i = 0; i < pt.max_indices[0]; i += 1)
+
+        int total = pt.max_indices[0];
+        int per_thread = (total + thread_num - 1) / thread_num;
+
         {
-            string guess = a->ordered_values[i];
-            // cout << guess << endl;
-            guesses.emplace_back(guess);
-            total_guesses += 1;
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            running_tasks = thread_num;
+            for (int t = 0; t < thread_num; ++t) {
+                ThreadArgs args = {this, a, "", t * per_thread, std::min((t + 1) * per_thread, total), t};
+                task_queue.push(args);
+            }
         }
+        queue_cv.notify_all();
+        WaitAllTasks();
+
+        MergeGuesses();
+        total_guesses = guesses.size();
     }
     else
     {
@@ -263,12 +338,27 @@ void PriorityQueue::Generate(PT pt)
         // 这个for循环就是你需要进行并行化的主要部分了，特别是在多线程&GPU编程任务中
         // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
         // 这个过程是可以高度并行化的
-        for (int i = 0; i < pt.max_indices[pt.content.size() - 1]; i += 1)
+        int total = pt.max_indices[pt.content.size() - 1];
+        int per_thread = (total + thread_num - 1) / thread_num;
+
         {
-            string temp = guess + a->ordered_values[i];
-            // cout << temp << endl;
-            guesses.emplace_back(temp);
-            total_guesses += 1;
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            running_tasks = thread_num;
+            for (int t = 0; t < thread_num; ++t) {
+                ThreadArgs args = {this, a, guess, t * per_thread, std::min((t + 1) * per_thread, total), t};
+                task_queue.push(args);
+            }
         }
+        queue_cv.notify_all();
+        WaitAllTasks();
+        
+        MergeGuesses();
+        total_guesses = guesses.size();
+    }
+}
+
+void PriorityQueue::MergeGuesses() {
+    for (auto& tg : thread_guesses) {
+        guesses.insert(guesses.end(), tg.begin(), tg.end());
     }
 }

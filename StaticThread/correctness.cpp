@@ -8,9 +8,9 @@ using namespace std;
 using namespace chrono;
 
 // 编译指令如下
-// g++ main.cpp train.cpp guessing.cpp md5.cpp -o main
-// g++ main.cpp train.cpp guessing.cpp md5.cpp -o main -O1
-// g++ main.cpp train.cpp guessing.cpp md5.cpp -o main -O2
+// g++ correctness.cpp train.cpp guessing.cpp md5.cpp -o main
+// g++ correctness.cpp train.cpp guessing.cpp md5.cpp -o main -O1
+// g++ correctness.cpp train.cpp guessing.cpp md5.cpp -o main -O2
 
 int main()
 {
@@ -44,6 +44,7 @@ int main()
     int cracked=0;
 
     q.init();
+    q.InitThreadPool();
     cout << "here" << endl;
     int curr_num = 0;
     auto start = system_clock::now();
@@ -86,6 +87,7 @@ int main()
                 array<std::string,8> input = {"","","",""};
                 for(int j=0;j<8&&i+j<count;j++)
                 {
+                    if (test_set.find(q.guesses[i+j]) != test_set.end()) {cracked+=1;}
                     input[j]=q.guesses[i+j];
                 }
                 MD5Hash_SIMD(input,state);
@@ -102,4 +104,5 @@ int main()
             q.guesses.clear();
         }
     }
+    q.DestroyThreadPool(); 
 }
