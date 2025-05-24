@@ -8,9 +8,9 @@ using namespace std;
 using namespace chrono;
 
 // 编译指令如下
-// g++ correctness.cpp train.cpp guessing.cpp md5.cpp -o main
-// g++ correctness.cpp train.cpp guessing.cpp md5.cpp -o main -O1
-// g++ correctness.cpp train.cpp guessing.cpp md5.cpp -o main -O2
+// g++ correctness.cpp train.cpp guessing.cpp md5.cpp -o main -fopenmp
+// g++ correctness.cpp train.cpp guessing.cpp md5.cpp -o main -O1 -fopenmp
+// g++ correctness.cpp train.cpp guessing.cpp md5.cpp -o main -O2 -fopenmp
 
 int main()
 {
