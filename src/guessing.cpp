@@ -1,5 +1,5 @@
 #include "PCFG.h"
-#include <mpi.h>
+#include "cuda_generate.h"
 using namespace std;
 
 void PriorityQueue::CalProb(PT &pt)
@@ -185,11 +185,7 @@ void PriorityQueue::Generate(PT pt)
     // 计算PT的概率，这里主要是给PT的概率进行初始化
     CalProb(pt);
 
-    int rank = 0, size = 1;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    
-    // 只有rank==0的进程应该访问和修改guesses和total_guesses
+    // 对于只有一个segment的PT，直接遍历生成其中的所有value即可
     if (pt.content.size() == 1)
     {
         // 指向最后一个segment的指针，这个指针实际指向模型中的统计数据
@@ -208,78 +204,24 @@ void PriorityQueue::Generate(PT pt)
             a = &m.symbols[m.FindSymbol(pt.content[0])];
         }
         
-        // Multi-thread TODO：
-        // 这个for循环就是你需要进行并行化的主要部分了，特别是在多线程&GPU编程任务中
-        // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
-        // 这个过程是可以高度并行化的
-        int total = pt.max_indices[0]; 
-        int chunk = (total + size - 1) / size;
-        int start = rank * chunk;
-        int end = std::min(start + chunk, total);
+        // CUDA并行生成
+        // 1. 准备 ordered_values
+        // 2. 调用 cuda_generate_guesses
+        // 3. 收集结果到 guesses
+        int n = pt.max_indices[0];
+        std::vector<char*> h_values(n);
+        for (int i = 0; i < n; ++i)
+            h_values[i] = (char*)a->ordered_values[i].c_str();
 
-        vector<string> local_guesses;
-        for (int i = start; i < end; i++)
-        {
-            string guess = a->ordered_values[i];
-            local_guesses.emplace_back(guess);
-        }
+        // 结果数组
+        std::vector<char*> h_results(n);
 
-        // 收集各进程猜测数量
-        int local_count = local_guesses.size();
-        vector<int> recv_counts(size);
-        MPI_Gather(&local_count, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD); 
-        // 拼接字符串为大buffer
-        string all_local;
-        vector<int> str_sizes;
-        for (auto &s : local_guesses)
-        {
-            str_sizes.push_back(s.size());
-            all_local += s;
+        cuda_generate_guesses("", h_values.data(), n, h_results.data());
+
+        for (int i = 0; i < n; ++i) {
+            guesses.emplace_back(h_results[i]);
+            total_guesses += 1;
         }
-        vector<int> displs(size, 0);
-        int total_count = 0;
-        if (rank == 0)
-        {
-            for (int i = 1; i < size; ++i)
-            displs[i] = displs[i - 1] + recv_counts[i - 1];
-            total_count = displs[size - 1] + recv_counts[size - 1];
-            guesses.resize(total_count);
-        }
-        
-        // 收集字符串长度
-        vector<int> all_sizes;
-        if (rank == 0) all_sizes.resize(total_count);
-        MPI_Gatherv(str_sizes.data(), local_count, MPI_INT,
-                    all_sizes.data(), recv_counts.data(), displs.data(), MPI_INT, 0, MPI_COMM_WORLD); 
-        // 收集字符串内容
-        int local_chars = all_local.size();
-        vector<int> recv_chars(size);
-        MPI_Gather(&local_chars, 1, MPI_INT, recv_chars.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
-        vector<int> char_displs(size, 0);
-        int total_chars = 0;
-        if (rank == 0)
-        {
-            for (int i = 1; i < size; ++i)
-                char_displs[i] = char_displs[i - 1] + recv_chars[i - 1];
-            total_chars = char_displs[size - 1] + recv_chars[size - 1];
-        }
-        string all_guesses;
-        if (rank == 0) all_guesses.resize(total_chars);
-        MPI_Gatherv(all_local.data(), local_chars, MPI_CHAR,
-                    &all_guesses[0], recv_chars.data(), char_displs.data(), MPI_CHAR, 0, MPI_COMM_WORLD);
-        // 还原字符串
-        if (rank == 0)
-        {
-            int pos = 0;
-            for (int i = 0; i < total_count; ++i)
-            {
-                guesses.push_back(all_guesses.substr(pos, all_sizes[i])); // 改为 push_back
-                pos += all_sizes[i];
-            }
-            total_guesses += total_count;
-        }
-        // 需要同步total_guesses到所有进程
-        MPI_Bcast(&total_guesses, 1, MPI_INT, 0, MPI_COMM_WORLD);
     }
     else
     {
@@ -324,77 +266,18 @@ void PriorityQueue::Generate(PT pt)
             a = &m.symbols[m.FindSymbol(pt.content[pt.content.size() - 1])];
         }
         
-        // Multi-thread TODO：
-        // 这个for循环就是你需要进行并行化的主要部分了，特别是在多线程&GPU编程任务中
-        // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
-        // 这个过程是可以高度并行化的
-        int total = pt.max_indices[pt.content.size() - 1];
-        int chunk = (total + size - 1) / size;
-        int start = rank * chunk;
-        int end = std::min(start + chunk, total);
+        int n = pt.max_indices[pt.content.size() - 1];
+        std::vector<char*> h_values(n);
+        for (int i = 0; i < n; ++i)
+            h_values[i] = (char*)a->ordered_values[i].c_str();
 
-        vector<string> local_guesses;
-        for (int i = start; i < end; i++)
-        {
-            string temp = guess + a->ordered_values[i];
-            local_guesses.emplace_back(temp);
-        }
+        std::vector<char*> h_results(n);
 
-        // 收集各进程猜测数量
-        int local_count = local_guesses.size();
-        vector<int> recv_counts(size);
-        MPI_Gather(&local_count, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
-        // 计算偏移
-        vector<int> displs(size, 0);
-        int total_count = 0;
-        if (rank == 0)
-        {
-            for (int i = 1; i < size; ++i)
-                displs[i] = displs[i - 1] + recv_counts[i - 1];
-            total_count = displs[size - 1] + recv_counts[size - 1];
-            guesses.resize(total_count);
+        cuda_generate_guesses(guess.c_str(), h_values.data(), n, h_results.data());
+
+        for (int i = 0; i < n; ++i) {
+            guesses.emplace_back(h_results[i]);
+            total_guesses += 1;
         }
-        // 拼接字符串为大buffer
-        string all_local;
-        vector<int> str_sizes;
-        for (auto &s : local_guesses)
-        {
-            str_sizes.push_back(s.size());
-            all_local += s;
-        }
-        // 收集字符串长度
-        vector<int> all_sizes;
-        if (rank == 0) all_sizes.resize(total_count);
-        MPI_Gatherv(str_sizes.data(), local_count, MPI_INT,
-                    all_sizes.data(), recv_counts.data(), displs.data(), MPI_INT, 0, MPI_COMM_WORLD);
-        // 收集字符串内容
-        int local_chars = all_local.size();
-        vector<int> recv_chars(size);
-        MPI_Gather(&local_chars, 1, MPI_INT, recv_chars.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
-        vector<int> char_displs(size, 0);
-        int total_chars = 0;
-        if (rank == 0)
-        {
-            for (int i = 1; i < size; ++i)
-                char_displs[i] = char_displs[i - 1] + recv_chars[i - 1];
-            total_chars = char_displs[size - 1] + recv_chars[size - 1];
-        }
-        string all_guesses;
-        if (rank == 0) all_guesses.resize(total_chars);
-        MPI_Gatherv(all_local.data(), local_chars, MPI_CHAR,
-                    &all_guesses[0], recv_chars.data(), char_displs.data(), MPI_CHAR, 0, MPI_COMM_WORLD);
-        // 还原字符串
-        if (rank == 0)
-        {
-            int pos = 0;
-            for (int i = 0; i < total_count; ++i)
-            {
-                guesses.push_back(all_guesses.substr(pos, all_sizes[i])); // 改为 push_back
-                pos += all_sizes[i];
-            }
-            total_guesses += total_count;
-        }
-        // 需要同步total_guesses到所有进程
-        MPI_Bcast(&total_guesses, 1, MPI_INT, 0, MPI_COMM_WORLD);
     }
 }
