@@ -5,10 +5,29 @@
 #include <iomanip>
 #include <unordered_set>
 #include <mpi.h>
+#include <thread>
+#include <future>
+#include <atomic>
 using namespace std;
 using namespace chrono;
 
-
+//  定义哈希任务函数
+int hash_and_count(const vector<string>& guesses, const unordered_set<string>& test_set, int& cracked, double& time_hash) {
+    int batch_cracked = 0;
+    bit32 state[4];
+    auto start_hash = chrono::system_clock::now();
+    for (const string& pw : guesses) {
+        if (test_set.find(pw) != test_set.end()) {
+            batch_cracked++;
+        }
+        MD5Hash(pw, state);
+    }
+    auto end_hash = chrono::system_clock::now();
+    auto duration = chrono::duration_cast<chrono::microseconds>(end_hash - start_hash);
+    time_hash += double(duration.count()) * chrono::microseconds::period::num / chrono::microseconds::period::den;
+    cracked += batch_cracked;
+    return batch_cracked;
+}
 // 序列化PT结构用于MPI广播
 void serializePT(const PT& pt, vector<int>& data) {
     data.clear();
@@ -108,6 +127,10 @@ int main()
     int total_guesses = 0;
     auto start = system_clock::now();
 
+    vector<string> hash_buffer; // 用于哈希的缓冲区
+    std::future<int> hash_future;
+    int last_batch_cracked = 0;
+
     while (true) {
         bool should_continue = false;
         if (rank == 0) {
@@ -144,25 +167,23 @@ int main()
 
         // 只有 rank 0 统计 cracked 和更新队列
         if (rank == 0) {
-            int batch_cracked = 0;
-            bit32 state[4];
-            auto start_hash = system_clock::now();
-            for (const string& pw : q.guesses) {
-                if (test_set.find(pw) != test_set.end()) {
-                    batch_cracked++;
-                }
-                MD5Hash(pw, state);
+            // 1. 启动哈希线程处理上一批口令
+            if (!hash_buffer.empty()) {
+                hash_future = std::async(std::launch::async, hash_and_count, std::cref(hash_buffer), std::cref(test_set), std::ref(cracked), std::ref(time_hash));
             }
-            auto end_hash = system_clock::now();
-            auto duration = duration_cast<microseconds>(end_hash - start_hash);
-            time_hash += double(duration.count()) * microseconds::period::num / microseconds::period::den;
-            cracked += batch_cracked;
-            total_guesses += q.guesses.size();
 
-            cout << "Guesses generated: " << total_guesses << ", batch_cracked: " << batch_cracked << ", total_cracked: " << cracked << endl;
+            // 2. 交换缓冲区，把本批生成的口令移到hash_buffer
+            hash_buffer.swap(q.guesses);
+            total_guesses += hash_buffer.size();
 
-            // 清空本批 guesses，避免内存暴涨
+            // 3. 清空本批 guesses，避免内存暴涨
             q.guesses.clear();
+
+            // 4. 等待上一批哈希完成并输出统计
+            if (hash_future.valid()) {
+                last_batch_cracked = hash_future.get();
+                cout << "Guesses generated: " << total_guesses << ", batch_cracked: " << last_batch_cracked << ", total_cracked: " << cracked << endl;
+            }
 
             // 终止条件
             if (total_guesses >= 10000000) {
@@ -206,6 +227,12 @@ int main()
         }
 
         MPI_Barrier(MPI_COMM_WORLD);
+    }
+
+    // 主循环外，最后一批哈希
+    if (rank == 0 && !hash_buffer.empty()) {
+        int last = hash_and_count(hash_buffer, test_set, cracked, time_hash);
+        cout << "Guesses generated: " << total_guesses << ", batch_cracked: " << last << ", total_cracked: " << cracked << endl;
     }
 
     MPI_Finalize();
